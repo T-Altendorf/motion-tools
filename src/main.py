@@ -5,12 +5,11 @@ from datetime import datetime, timedelta
 import natsort
 from api.motion_api import MotionAPI
 from pdf_parser.pdf_extractor import FileExtractor
+from overview.overview import get_upcoming_week_tasks
 from task_generator.task_generator import TaskGenerator
 import constants
 
-def main():
-    
-    api = MotionAPI(constants.MOTION_API_KEY)
+def task_generator(api):
     task_generator  = TaskGenerator(datetime.now() - timedelta(weeks=2))
     # task_generator: TaskGenerator = TaskGenerator(datetime.now())
 
@@ -77,6 +76,17 @@ def main():
                         block_task["blockingTasks"] = blockingTasks
                         api.update_task(block_task, True)
                         print("Blocking task added")
+
+def main():    
+    api = MotionAPI(constants.MOTION_API_KEY)
+
+    action = input("What do you want to do? (task_generator/overview): ")
+    if action == "task_generator":
+        task_generator(api)
+    elif action == "overview":
+        get_upcoming_week_tasks(api)
+    else:
+        print("Invalid action")
 
 if __name__ == "__main__":
     main()

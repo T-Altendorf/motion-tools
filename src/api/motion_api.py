@@ -1,6 +1,7 @@
 import sys
 import time
 import requests
+from datetime import datetime, timezone
 
 class MotionAPI:
     def __init__(self, api_key, max_calls_per_minute=12, period_in_seconds=60, token_file_path="token.txt"):
@@ -55,7 +56,6 @@ class MotionAPI:
             headers["Accept"] = "application/json"
 
         response = requests.request(method, url, headers=headers, params=params, json=data)
-        print(response.json())
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx and 5xx)
         
         self.request_count += 1
@@ -103,11 +103,41 @@ class MotionAPI:
         return None  # Return None if no matching workspace is found
     
     def get_tasks_in_project(self, project_id):
-        endpoint = "/tasks"
         params = {"projectId": project_id}
-        response = self._request("GET", endpoint, params)
-        print(response)
+        response = self.get_tasks(params)
         return response.get("tasks", [])
+    
+    def get_tasks(self, params=None):
+        endpoint = "/tasks"
+        response = self._request("GET", endpoint, params)
+        return response.get("tasks", [])
+    
+    def get_tasks_by_date_range(self, start_date, end_date):
+        tasks = self.get_tasks()
+        for task in tasks:
+            print(task["name"] + " " + str(task["scheduledStart"]))
+        start_date = start_date.replace(tzinfo=timezone.utc)
+        end_date = end_date.replace(tzinfo=timezone.utc)
+        scheduled_tasks = [
+            task for task in tasks
+            if "scheduledStart" in task and task["scheduledStart"] is not None
+        ]
+        filtered_tasks = [
+            task for task in scheduled_tasks
+            if self.parse_date(task["scheduledStart"]) >= start_date
+            and self.parse_date(task["scheduledStart"]) <= end_date
+        ]
+        return filtered_tasks
+    
+    def parse_date(self, date_string):
+        # Assuming dueDate is in ISO 8601 format (e.g., "2023-09-28T16:46:48.821-06:00")
+        try:
+            # Convert to offset-aware datetime object in UTC
+            dt = datetime.fromisoformat(date_string.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc)
+        except ValueError as e:
+            print(f"Failed to parse date string {date_string}: {e}")
+            return None  # or handle error as appropriate
     
     def create_task(self, task, workspace_id=None):
         endpoint = "/tasks"
