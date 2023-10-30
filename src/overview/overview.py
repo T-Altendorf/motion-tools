@@ -102,7 +102,9 @@ def get_upcoming_week_tasks(motion_api: MotionAPI, google_api: GoogleCalendarAPI
     # Add events to colors
     for event in events:
         color_name = color_to_name[event["colorId"]]
-        color_time[event["colorId"]] = color_time.get(color_name, 0) + event["duration"]
+        color_time[event["colorId"]] = (
+            color_time.get(event["colorId"], 0) + event["duration"]
+        )
         events_by_color[event["colorId"]] = events_by_color.get(
             event["colorId"], []
         ) + [event]
