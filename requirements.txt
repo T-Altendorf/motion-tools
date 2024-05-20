@@ -1,6 +1,9 @@
+beautifulsoup4==4.12.3
 cachetools==5.3.2
 certifi==2023.7.22
+cffi==1.16.0
 charset-normalizer==3.3.1
+cryptography==42.0.7
 google-api-core==2.12.0
 google-api-python-client==2.105.0
 google-auth==2.23.3
@@ -14,10 +17,14 @@ oauthlib==3.2.2
 protobuf==4.24.4
 pyasn1==0.5.0
 pyasn1-modules==0.3.0
+pycparser==2.22
+PyJWT==2.8.0
 pyparsing==3.1.1
+pytz==2024.1
 requests==2.31.0
 requests-oauthlib==1.3.1
 rsa==4.9
+soupsieve==2.5
 sty==1.0.4
 uritemplate==4.1.1
 urllib3==2.0.7
