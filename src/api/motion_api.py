@@ -1,6 +1,9 @@
+import constants
 import sys
 import time
 import requests
+import jwt
+import os
 from datetime import datetime, timezone
 
 
@@ -19,16 +22,61 @@ class MotionAPI:
         self.last_request_time = time.time()
         self.token_file_path = token_file_path
         self.token = None
+        self.token_url = constants.NEW_MOTION_TOKEN_URL
         self.load_token()
 
     def load_token(self):
         try:
-            with open(self.token_file_path, "r") as file:
-                self.token = file.read().strip()
-        except FileNotFoundError:
-            print(f"Token file not found: {self.token_file_path}")
+            # Read the token from the file
+            if not self.token:
+                if not os.path.exists(self.token_file_path):
+                    with open(self.token_file_path, "w") as file:
+                        file.write("")  # Create an empty file if it doesn't exist yet
+                with open(self.token_file_path, "r") as file:
+                    self.token = file.read()
+            if self.is_token_valid():
+                return
+
+            response = requests.get(
+                self.token_url, params={"key": constants.NEW_MOTION_TOKEN_KEY}
+            )
+            response.raise_for_status()  # Raises an HTTPError if the HTTP request returned an unsuccessful status code
+
+            # Assuming the endpoint returns a JSON with an access_token field
+            self.token = response.json().get("access_token", "")
+
+            with open(self.token_file_path, "w") as file:
+                file.write(self.token)
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err}")
         except Exception as e:
-            print(f"An error occurred while loading the token: {e}")
+            print(f"An error occurred: {e}")
+
+    def is_token_valid(self):
+        try:
+            # Decode the token without verification - we're not checking the signature here
+            payload = jwt.decode(self.token, options={"verify_signature": False})
+            # Get the current time
+            now = datetime.utcnow()
+            # Get the expiration time from the token
+            exp = datetime.utcfromtimestamp(payload["exp"])
+
+            # Check if the current time is before the expiration time
+            return now < exp
+        except jwt.ExpiredSignatureError:
+            # Token is expired
+            return False
+        except jwt.InvalidTokenError:
+            # Token is invalid for some other reason
+            return False
+        except Exception as e:
+            print(f"An error occurred during token validation: {e}")
+            return False
+
+    def refresh_token_if_invalid(self):
+        if not self.is_token_valid():
+            print("Refreshing token...")
+            self.load_token()
 
     def _rate_limit(self):
         # Reset request count every period
@@ -55,7 +103,16 @@ class MotionAPI:
         sys.stdout.flush()
 
     def _request(self, method, endpoint, params=None, data=None, limit=None):
-        """Make a request to the Motion API and return the response data"""
+        """Make a request to the Motion API and return the response data
+        Parameters:
+            method (str): The HTTP method to use (e.g., "GET", "POST", "PATCH")
+            endpoint (str): The API endpoint (e.g., "/tasks")
+            params (dict): Query parameters to include in the request
+            data (dict): Data to include in the request body
+            limit (int): The maximum number of pages to fetch (default: None)
+        Returns:
+            list: A list of results from the API
+        """
         self._rate_limit()  # Ensure compliance with rate limit before making a request
 
         url = f"https://api.usemotion.com/v1{endpoint}"
@@ -78,7 +135,10 @@ class MotionAPI:
             page_count += 1
 
             response_data = response.json()
-            all_results.extend(response_data.get(endpoint.replace("/", ""), []))
+            if method == "POST":
+                all_results.append(response_data)
+            else:
+                all_results.extend(response_data.get(endpoint.replace("/", ""), []))
 
             # Check for stopping conditions: no more results, or page limit reached (if specified)
             next_cursor = response_data.get("meta", {}).get("nextCursor")
@@ -91,10 +151,15 @@ class MotionAPI:
             else:
                 params = {"cursor": next_cursor}
 
-        return all_results
+        if method == "POST":
+            return all_results[0]
+        else:
+            return all_results
 
-    def _request_internal(self, method, endpoint, params=None, data=None):
-        self._rate_limit()  # Ensure compliance with rate limit before making a request
+    def _request_internal(
+        self, method, endpoint, params=None, data=None, return_keys=None
+    ):
+        self.refresh_token_if_invalid()
 
         url = f"https://internal.usemotion.com{endpoint}"
         headers = {"Authorization": "Bearer " + self.token}
@@ -103,13 +168,18 @@ class MotionAPI:
             headers["Content-Type"] = "application/json"
             headers["Accept"] = "application/json"
 
+        print(
+            f"method: {method}, endpoint: {endpoint}, params: {params}, data: {data}, return_keys: {return_keys}"
+        )
         response = requests.request(
             method, url, headers=headers, params=params, json=data
         )
-        print(response.json())
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx and 5xx)
-
-        self.request_count += 1
+        if return_keys:
+            response_data = response.json()
+            if isinstance(return_keys, str):
+                return response_data.get(return_keys, [])
+            return {key: response_data.get(key, []) for key in return_keys}
         return response.json()
 
     def get_projects(self, workspace_id):
@@ -119,7 +189,7 @@ class MotionAPI:
 
     def get_project_id(self, workspace_id, project_name):
         projects = self.get_projects(workspace_id)
-        for project in projects.get("projects", []):
+        for project in projects:
             if project["name"].lower() == project_name.lower():
                 return project["id"]
         return None  # Return None if no matching project is found
@@ -130,23 +200,66 @@ class MotionAPI:
 
     def get_workspace_id(self, workspace_name):
         workspaces = self.get_workspaces()
-        for workspace in workspaces.get("workspaces", []):
+        for workspace in workspaces:
             if workspace["name"].lower() == workspace_name.lower():
                 return workspace["id"]
         return None  # Return None if no matching workspace is found
 
     def get_tasks_in_project(self, project_id):
         params = {"projectId": project_id}
-        response = self.get_tasks(params)
+        response = self.get_tasks_legacy(params)
+        return response
+
+    def get_scheduled_tasks(self, return_keys=["tasks"], params=None):
+        endpoint = "/personal_tasks/scheduled_tasks"
+        print(f"endpoint: {endpoint}, params: {params}, return_keys: {return_keys}")
+        response = self._request_internal("GET", endpoint, params, None, return_keys)
+
+        if len(return_keys) == 1:
+            return response[return_keys[0]]
+        elif len(return_keys) == 2:
+            return response[return_keys[0]], response[return_keys[1]]
+        elif len(return_keys) == 3:
+            return (
+                response[return_keys[0]],
+                response[return_keys[1]],
+                response[return_keys[2]],
+            )
+        else:
+            raise ValueError("Invalid number of return keys. Must be 1 to 3.")
+
+    def get_scheduled_projects(self, params=None):
+        endpoint = "/personal_tasks/scheduled_tasks"
+        response = self._request_internal(
+            "GET", endpoint, params, return_keys="projects"
+        )
         return response
 
     def get_tasks(self, params=None, limit=None):
+        tasks, projects = self.get_scheduled_tasks(["tasks", "projects"], params)
+        for task in tasks:
+            project_id = task.get("projectId")
+            if project_id:
+                project = next((p for p in projects if p["id"] == project_id), None)
+                if project:
+                    task["project"] = project
+            else:
+                task["project"] = None
+
+            if task.get("chunks"):
+                for chunk in task["chunks"]:
+                    tasks.append(chunk)
+
+        return tasks
+
+    def get_tasks_legacy(self, params=None, limit=None):
         endpoint = "/tasks"
         response = self._request("GET", endpoint, params, limit=limit)
         return response
 
     def get_tasks_by_date_range(self, start_date, end_date):
-        tasks = self.get_tasks(limit=2)
+        tasks = self.get_tasks(limit=10)
+
         start_date = start_date.replace(tzinfo=timezone.utc)
         end_date = end_date.replace(tzinfo=timezone.utc)
         scheduled_tasks = [
@@ -195,3 +308,40 @@ class MotionAPI:
             endpoint = f"/team_tasks/{task_id}"
             return self._request_internal("PATCH", endpoint, data=task)
         return self._request("PATCH", endpoint, data=task)
+
+    def update_tasks_if_duration_exceeds(
+        self, workspace_name, project_name, duration_limit
+    ):
+        # Step 1: Get workspace ID
+        workspace_id = self.get_workspace_id(workspace_name)
+        if workspace_id is None:
+            print(f"Workspace with name {workspace_name} not found.")
+            return
+
+        # Step 2: Get project ID
+        project_id = self.get_project_id(workspace_id, project_name)
+        if project_id is None:
+            print(f"Project with name {project_name} not found.")
+            return
+
+        # Step 3: Get all tasks for the project ID
+        tasks = self.get_tasks_in_project(project_id)
+
+        # Step 4: Iterate over tasks to find ones with duration over 90 minutes
+        for task in tasks:
+            duration = task.get(
+                "duration"
+            )  # Assuming the duration is in minutes and available as 'duration'
+            if duration and duration >= duration_limit:
+                # Step 5: Update the task if duration is higher than 90 minutes
+                task_update = {
+                    "id": task["id"],
+                    "isChunkedTask": True,
+                    "minimumDuration": 45,
+                    "workspaceId": workspace_id,
+                }
+                try:
+                    self.update_task(task_update, True)
+                    print(f"Task {task['id']} updated to allow chunking.")
+                except Exception as e:
+                    print(f"Failed to update task {task['id']}: {e}")

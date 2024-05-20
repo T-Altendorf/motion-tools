@@ -12,24 +12,24 @@ from task_generator.task_generator import TaskGenerator
 import constants
 
 
-def task_generator(api):
-    task_generator = TaskGenerator(datetime.now() - timedelta(weeks=2))
+def task_generator(api: MotionAPI, file_ending="pdf"):
+    task_generator = TaskGenerator(datetime(2024, 4, 15))
 
     # task_generator: TaskGenerator = TaskGenerator(datetime.now())
 
-    # pdf_dir = input("Enter the path to the pdf directory: ")
-    # task_name = input("Enter the task name: ")
-    # task_duration = input("Enter the task duration in minutes: ")
-    pdf_dir = "C:\\Users\\timal\\OneDrive - stud.tu-darmstadt.de\\EDU\\TU\\23 SoSe\\Handeln\\Lecture\\Slides"
-    shorthand = "HND"
+    pdf_dir = "/Users/timaltendorf/Library/CloudStorage/OneDrive-stud.tu-darmstadt.de/EDU/TU/24 SoSe/Statistische Modellierung/exercise/sheets"
+    # pdf_dir = input("Enter the path to the directory: ")
+    shorthand = "STMD"
+    task_name = "Do Exercise "
+    task_duration = 150
 
-    task_name = "Skim Lecture "
-    task_duration = 45
+    # task_name = input("Enter the task name: ")
+    # task_duration = int(input("Enter the task duration in minutes: "))
 
     workspace_id = None
     while workspace_id is None:
         # workspace_name = input("Enter the workspace name: ")
-        workspace_name = "uni_tim"
+        workspace_name = "Uni_Tim"
         workspace_id = api.get_workspace_id(workspace_name)
         if workspace_id is None:
             print(f"Workspace '{workspace_name}' not found. Please try again.")
@@ -37,7 +37,7 @@ def task_generator(api):
     project_id = None
     while project_id is None:
         # project_name = input("Enter the project name: ")
-        project_name = "handeln"
+        project_name = "StatMod"
         project_id = api.get_project_id(workspace_id, project_name)
         if project_id is None:
             print(f"Project '{project_name}' not found. Please try again.")
@@ -53,10 +53,17 @@ def task_generator(api):
         )
         tasks_in_project = api.get_tasks_in_project(project_id)
 
+    if input("Do you want to add a file ending? defaults to pdf (y/n): ") == "y":
+        file_ending = input("Enter the file ending: ")
+    start_from_week = input("Enter the start week (default is 1): ")
+    if start_from_week:
+        start_from_week = int(start_from_week)
+    else:
+        start_from_week = 1
     for filename in sorted_files:
-        if filename.endswith(".pdf"):
+        if filename.endswith("." + file_ending):
             week_number, pdf_name = FileExtractor.extract_week_number_and_name(filename)
-            if week_number:
+            if week_number >= start_from_week:
                 if blocking_name:
                     blocking_ids = [
                         task["id"]
@@ -68,7 +75,11 @@ def task_generator(api):
                     ]
                 else:
                     blocking_ids = None
-                name = task_name + pdf_name.replace("_", " ").replace("-", " ")
+                name = (
+                    task_name.strip()
+                    + " "
+                    + pdf_name.replace("_", " ").replace("-", " ")
+                )
                 task = task_generator.generate_task_for_week(
                     week_number,
                     name,
@@ -94,6 +105,9 @@ def task_generator(api):
                         block_task["blockingTasks"] = blockingTasks
                         api.update_task(block_task, True)
                         print("Blocking task added")
+
+    if task_duration >= 90:
+        api.update_tasks_if_duration_exceeds(workspace_name, project_name, 90)
 
 
 def get_upcoming_week_events(api: GoogleCalendarAPI):
@@ -127,10 +141,12 @@ def main():
     google_api = GoogleCalendarAPI("google_client_secret.json", "google_token.pickle")
 
     action = input("What do you want to do? (task_generator/overview): ")
-    if action == "task_generator":
+    if action == "t":
         task_generator(motion_api)
-    elif action == "overview":
+    elif action == "o":
         get_upcoming_week_tasks(motion_api, google_api)
+    elif action == "chunk":
+        motion_api.update_tasks_if_duration_exceeds("Uni_Tim", "DMML", 90)
     elif action == "google":
         print(get_upcoming_week_events(google_api))
     elif action == "exit":
