@@ -1,10 +1,13 @@
 import os
+import jwt
 import constants
 import sys
 import time
 import requests
-import jwt
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import re
+from collections import defaultdict
+import pytz
 
 
 class MotionAPI:
@@ -104,7 +107,14 @@ class MotionAPI:
         sys.stdout.flush()
 
     def _request(
-        self, method, endpoint, params=None, data=None, limit=None, max_retries=3
+        self,
+        method,
+        endpoint,
+        params=None,
+        data=None,
+        limit=None,
+        max_retries=3,
+        direct_list=False,
     ):
         """Make a request to the Motion API and return the response data
         Parameters:
@@ -169,18 +179,24 @@ class MotionAPI:
             if method == "POST":
                 all_results.append(response_data)
             else:
-                all_results.extend(response_data.get(endpoint.replace("/", ""), []))
+                if direct_list:
+                    all_results.extend(response_data)
+                else:
+                    all_results.extend(response_data.get(endpoint.replace("/", ""), []))
 
             # Check for stopping conditions: no more results, or page limit reached (if specified)
-            next_cursor = response_data.get("meta", {}).get("nextCursor")
-            if not next_cursor or (limit and page_count >= limit):
-                break
+            if not direct_list:
+                next_cursor = response_data.get("meta", {}).get("nextCursor")
+                if not next_cursor or (limit and page_count >= limit):
+                    break
 
-            # Update cursor parameter for the next request
-            if params:
-                params["cursor"] = next_cursor
+                # Update cursor parameter for the next request
+                if params:
+                    params["cursor"] = next_cursor
+                else:
+                    params = {"cursor": next_cursor}
             else:
-                params = {"cursor": next_cursor}
+                break
 
         if method == "POST":
             return all_results[0]
@@ -233,6 +249,36 @@ class MotionAPI:
     def get_tasks_in_project(self, project_id):
         params = {"projectId": project_id}
         response = self.get_tasks(params)
+        return response
+
+    def get_schedules(self, params=None):
+        endpoint = "/schedules"
+        response = self._request("GET", endpoint, params, direct_list=True)
+        return response
+
+    def get_scheduled_tasks(self, return_keys=["tasks"], params=None):
+        endpoint = "/personal_tasks/scheduled_tasks"
+        print(f"endpoint: {endpoint}, params: {params}, return_keys: {return_keys}")
+        response = self._request_internal("GET", endpoint, params, None, return_keys)
+
+        if len(return_keys) == 1:
+            return response[return_keys[0]]
+        elif len(return_keys) == 2:
+            return response[return_keys[0]], response[return_keys[1]]
+        elif len(return_keys) == 3:
+            return (
+                response[return_keys[0]],
+                response[return_keys[1]],
+                response[return_keys[2]],
+            )
+        else:
+            raise ValueError("Invalid number of return keys. Must be 1 to 3.")
+
+    def get_scheduled_projects(self, params=None):
+        endpoint = "/personal_tasks/scheduled_tasks"
+        response = self._request_internal(
+            "GET", endpoint, params, return_keys="projects"
+        )
         return response
 
     def get_tasks(self, params=None, limit=None):
@@ -480,3 +526,94 @@ class MotionAPI:
                     print(f"Task {task['id']} updated to allow chunking.")
                 except Exception as e:
                     print(f"Failed to update task {task['id']}: {e}")
+
+    def reschedule_tasks_by_week(
+        self,
+        project_id,
+        start_date,
+        end_date,
+        schedule=None,
+        no_reschedule_patterns=None,
+    ):
+        tasks = self.get_tasks_in_project(project_id)
+        week_tasks = defaultdict(list)
+        week_pattern = re.compile(r"^[A-Z]{3,4}-W(\d+):")
+
+        for task in tasks:
+            if not task.get("completed", False):
+                # Check if any no_reschedule_pattern is in the task's name or description
+                if any(
+                    pattern in task.get("name", "")
+                    for pattern in no_reschedule_patterns
+                ):
+                    continue  # Skip this task
+                match = week_pattern.match(task["name"])
+                if match:
+                    week_number = int(match.group(1))
+                    week_tasks[week_number].append(task)
+
+        if not week_tasks:
+            print("No uncompleted tasks found with the specified pattern.")
+            return
+
+        sorted_weeks = sorted(week_tasks.keys())
+        num_weeks = len(sorted_weeks)
+
+        # Determine the total number of available schedule days
+        total_days = sum(
+            1 for _ in self.generate_schedule_days(start_date, end_date, schedule)
+        )
+
+        # Calculate days per week
+        days_per_week = total_days / num_weeks if num_weeks else 0
+        if schedule is not None:
+            timezone_str = schedule.get(
+                "timezone", "UTC"
+            )  # Default to UTC if timezone is not specified
+        else:
+            timezone_str = "UTC"
+        timezone = pytz.timezone(timezone_str)
+
+        # Assign new scheduled dates to tasks
+        for i, week in enumerate(sorted_weeks):
+            deadline_day = self.calculate_week_deadline(
+                start_date, days_per_week * (i + 1), schedule
+            )
+            for task in week_tasks[week]:
+                # Convert deadline_day to the specified timezone
+                deadline_day_with_tz = deadline_day.replace(tzinfo=pytz.utc).astimezone(
+                    timezone
+                )
+
+                # Set the deadline to 23:59 in the specified timezone
+                deadline_day_with_tz = deadline_day_with_tz.replace(
+                    hour=23, minute=59, second=0, microsecond=0
+                )
+                data = {
+                    "id": task["id"],
+                    "startDate": start_date.isoformat(),
+                    "dueDate": deadline_day_with_tz.isoformat(),
+                }
+                self.update_task(data, True)
+
+    def generate_schedule_days(self, start_date, end_date, schedule=None):
+        current_date = start_date
+        while current_date <= end_date:
+            if (
+                schedule is None
+                or current_date.strftime("%A").lower() in schedule["schedule"]
+            ):
+                yield current_date
+            current_date += timedelta(days=1)
+
+    def calculate_week_deadline(self, start_date, days_to_add, schedule=None):
+        current_date = start_date
+        days_added = 0
+        while days_added < days_to_add:
+            if (
+                schedule is None
+                or current_date.strftime("%A").lower() in schedule["schedule"]
+            ):
+                days_added += 1
+            current_date += timedelta(days=1)
+        return current_date - timedelta(days=1)

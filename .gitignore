@@ -16,3 +16,5 @@ extracted_mood_log.xlsx
 ~$extracted_mood_log.xlsx
 
 task_config.json
+
+.env
