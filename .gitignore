@@ -1,4 +1,4 @@
-env
+.env
 
 *.code-workspace
 
@@ -7,3 +7,12 @@ env
 google_client_secret.json
 google_token.pickle
 token.txt
+google_master_token.txt
+
+.DS_Store
+
+tasks_export.txt
+extracted_mood_log.xlsx
+~$extracted_mood_log.xlsx
+
+task_config.json
